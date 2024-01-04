@@ -11,6 +11,10 @@ target 'LocalizationDemo' do
   pod 'JKSwiftExtension'
   pod 'SnapKit'
   
+  # 第三方登录
+  pod 'GoogleSignIn', '7.0.0'
+  pod 'FBSDKLoginKit' '16.2.1'
+  
   # DEBUG工具
   pod 'LookinServer', :configurations => ['Debug']
 
