@@ -129,27 +129,34 @@ extension FirebaseAuth {
     }
 }
 
-fileprivate func randomNonceString() -> String {
-    var keyData = Data(count: 32)
-    let result = keyData.withUnsafeMutableBytes {
-        SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!)
+fileprivate func randomNonceString(length: Int = 32) -> String {
+    precondition(length > 0)
+    var randomBytes = [UInt8](repeating: 0, count: length)
+    let errorCode = SecRandomCopyBytes(kSecRandomDefault, randomBytes.count, &randomBytes)
+    if errorCode != errSecSuccess {
+        fatalError(
+            "Unable to generate nonce. SecRandomCopyBytes failed with OSStatus \(errorCode)"
+        )
     }
-    if result == errSecSuccess {
-        return keyData.base64EncodedString()
-    } else {
-        return keyData.base64EncodedString()
+    
+    let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
+    let nonce = randomBytes.map { byte in
+        // Pick a random character from the set, wrapping around if needed.
+        charset[Int(byte) % charset.count]
     }
+    
+    return String(nonce)
 }
 
 @available(iOS 13, *)
-fileprivate func sha256(_ input: String) -> String {
-    let inputData = Data(input.utf8)
-    let hashedData = SHA256.hash(data: inputData)
-    let hashString = hashedData.compactMap {
-        return String(format: "%02x", $0)
-    }.joined()
-    
-    return hashString
+private func sha256(_ input: String) -> String {
+  let inputData = Data(input.utf8)
+  let hashedData = SHA256.hash(data: inputData)
+  let hashString = hashedData.compactMap {
+    String(format: "%02x", $0)
+  }.joined()
+
+  return hashString
 }
 
 // Apple
@@ -168,6 +175,7 @@ extension FirebaseAuth: ASAuthorizationControllerDelegate, ASAuthorizationContro
         authorizationController.presentationContextProvider = self
         authorizationController.performRequests()
     }
+
     
     // MARK: - ASAuthorizationControllerPresentationContextProviding
     /// - Tag: provide_presentation_anchor
@@ -179,75 +187,55 @@ extension FirebaseAuth: ASAuthorizationControllerDelegate, ASAuthorizationContro
     /** - Tag: did_complete_authorization
      * 1. 与许多其他身份提供商不同，Apple 不提供照片网址。
      * 2. 如果用户选择不与应用分享其真实电子邮件，Apple 会为该用户预配唯一的电子邮件地址来与应用共享。此电子邮件的格式为 xyz@privaterelay.appleid.com。如果您配置了私人电子邮件中继服务，则 Apple 会将发送到匿名地址的电子邮件转发到用户的真实电子邮件地址。
-     * 3. Apple 只会在用户首次登录时与应用共享用户信息（例如显示名
+     * 3. Apple 只会在用户首次登录时与应用共享用户信息
      **/
     func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        guard let nonce = currentNonce else {
-          fatalError("Invalid state: A login callback was received, but no login request was sent.")
-        }
-        
-        switch authorization.credential {
-        case let appleIDCredential as ASAuthorizationAppleIDCredential:
-            // Create an account in your system.
-            let userIdentifier = appleIDCredential.user
-            let fullName = appleIDCredential.fullName
+        if let credential = authorization.credential as? ASAuthorizationAppleIDCredential {
+            // 苹果用户唯一标识符，该值在同一个开发者账号下的所有 App 下是一样的，开发者可以用该唯一标识符与自己后台系统的账号体系绑定起来。
+            let userIdentifier = credential.user
+            // 苹果用户信息 如果授权过，可能无法再次获取该信息
+            let fullName = credential.fullName
             let userName = fullName?.givenName ?? fullName?.familyName ?? ""
-            let email = appleIDCredential.email
+            let email = credential.email ?? ""
+//            let realUserStatus = credential.realUserStatus
+            print("[DEBUG]:: userName = \(userName); email = \(email);")
             
-            // For the purpose of this demo app, store the `userIdentifier` in the keychain.
-            self.saveUserInKeychain(userIdentifier)
+            // Securely store the userIdentifier locally
+            self.saveUserIdentifier(userIdentifier)
             
-            print("[DEBUG]:: signIn with Apple")
-            // For the purpose of this demo app, show the password credential as an alert.
-            DispatchQueue.main.async {
-                self.showPasswordCredentialAlert(username: userName, email: email)
-            }
-            
-        case let passwordCredential as ASPasswordCredential:
-            
-            // Sign in using an existing iCloud Keychain credential.
-            let username = passwordCredential.user
-            let password = passwordCredential.password
-            
-            print("[DEBUG]:: signIn with Apple")
-            // For the purpose of this demo app, show the password credential as an alert.
-            DispatchQueue.main.async {
-                self.showPasswordCredentialAlert(username: username, password: password)
-            }
-            
-        default:
-            break
+            // 服务器验证需要使用的参数
+//            let state = credential.state ?? ""
+//            let identityToken = credential.identityToken
+//            let authorizationCode = credential.authorizationCode
+//            // Create a session with your server and verify the information
+//            self.createSession(identityToken: identityToken, authorizationCode: authorizationCode)
         }
     }
     
     func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-       // Handle error.
-       print("Sign in with Apple errored: \(error)")
+        guard let authError = error as? ASAuthorizationError else {
+            print("[DEBUG]::Apple: Error \(error.localizedDescription)")
+            return
+        }
+        switch (authError.code) {
+        case .canceled:
+            print("[DEBUG]::Apple:用户取消了授权请求")
+        case .failed:
+            print("[DEBUG]::Apple:授权请求失败")
+        case .invalidResponse:
+            print("[DEBUG]::Apple:授权请求响应无效")
+        case .notHandled:
+            print("[DEBUG]::Apple:未能处理授权请求")
+        default:
+            print("[DEBUG]::Apple: Error \(error.localizedDescription)")
+        }
      }
     
-    private func saveUserInKeychain(_ userIdentifier: String) {
+    private func saveUserIdentifier(_ userIdentifier: String) {
         do {
             try KeychainItem(service: "com.cocoa.localizationDemo", account: "userIdentifier").saveItem(userIdentifier)
         } catch {
             print("Unable to save userIdentifier to keychain.")
         }
-    }
-    
-    private func showPasswordCredentialAlert(username: String, password: String? = nil, email: String? = nil) {
-        guard let presentingVC = presentingViewControler else { return }
-        
-        var content = "Username: \(username)"
-        if let password {
-            content.append("\n Password: \(password)")
-        }
-        if let email {
-            content.append("\n Email: \(email)")
-        }
-        let message = "The app has received your selected credential from the keychain. \n\n \(content)"
-        let alertController = UIAlertController(title: "Keychain Credential Received",
-                                                message: message,
-                                                preferredStyle: .alert)
-        alertController.addAction(UIAlertAction(title: "Dismiss", style: .cancel, handler: nil))
-        presentingVC.present(alertController, animated: true, completion: nil)
     }
 }
